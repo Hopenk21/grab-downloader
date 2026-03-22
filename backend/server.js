@@ -7,17 +7,14 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// In production set ALLOWED_ORIGIN to your Netlify URL, e.g. https://grab-downloader.netlify.app
 const allowedOrigin = process.env.ALLOWED_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin }));
 app.use(express.json());
 app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
 
-// Ensure downloads dir exists
 const downloadsDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir);
 
-// Detect platform from URL
 function detectPlatform(url) {
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'YouTube';
   if (url.includes('instagram.com')) return 'Instagram';
@@ -39,7 +36,7 @@ function formatDuration(seconds) {
     : `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// GET /api/info — fetch video metadata
+// GET /api/info
 app.get('/api/info', (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -58,20 +55,25 @@ app.get('/api/info', (req, res) => {
 
     try {
       const info = JSON.parse(stdout);
+
+      // Only MP4 video formats, deduplicated by height, sorted best first
+      const seenHeights = new Set();
       const formats = (info.formats || [])
-        .filter(f => f.ext && (f.height || f.abr))
+        .filter(f => f.ext === 'mp4' && f.height && f.vcodec && f.vcodec !== 'none')
+        .sort((a, b) => b.height - a.height)
+        .filter(f => {
+          if (seenHeights.has(f.height)) return false;
+          seenHeights.add(f.height);
+          return true;
+        })
         .map(f => ({
           format_id: f.format_id,
-          ext: f.ext,
-          height: f.height || null,
-          abr: f.abr ? Math.round(f.abr) : null,
+          ext: 'mp4',
+          height: f.height,
           filesize: f.filesize || null,
-          label: f.height
-            ? `${f.height}p · ${f.ext.toUpperCase()}`
-            : `Audio ${Math.round(f.abr || 0)}kbps · ${f.ext.toUpperCase()}`,
-          type: f.height ? 'video' : 'audio',
-        }))
-        .slice(0, 15);
+          label: `${f.height}p · MP4`,
+          type: 'video',
+        }));
 
       res.json({
         title: info.title,
@@ -89,7 +91,7 @@ app.get('/api/info', (req, res) => {
   });
 });
 
-// POST /api/download — download video
+// POST /api/download
 app.post('/api/download', (req, res) => {
   const { url, format_id, audioOnly } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -102,9 +104,10 @@ app.post('/api/download', (req, res) => {
   if (audioOnly) {
     formatFlag = '-x --audio-format mp3';
   } else if (format_id) {
-    formatFlag = `-f "${format_id}"`;
+    // Merge selected video with best audio into mp4
+    formatFlag = `-f "${format_id}+bestaudio[ext=m4a]/${format_id}" --merge-output-format mp4`;
   } else {
-    formatFlag = '-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"';
+    formatFlag = '-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4';
   }
 
   const cmd = `yt-dlp ${formatFlag} -o "${outputPath}" --no-playlist "${url}"`;
@@ -113,7 +116,6 @@ app.post('/api/download', (req, res) => {
     if (err) {
       return res.status(400).json({
         error: 'Download failed.',
-        hint: 'Ensure yt-dlp is installed: pip install yt-dlp',
         details: stderr.slice(0, 300),
       });
     }
@@ -134,7 +136,6 @@ app.post('/api/download', (req, res) => {
   });
 });
 
-// Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', port: PORT }));
 
 app.listen(PORT, () => {
