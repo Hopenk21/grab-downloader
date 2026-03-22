@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: grab-downloader
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: ALLOWED_ORIGIN
+        sync: false   # You'll fill this in after getting your Netlify URL
+    healthCheckPath: /api/health
