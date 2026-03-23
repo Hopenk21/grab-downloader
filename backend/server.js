@@ -3,6 +3,7 @@ const cors = require('cors');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -14,6 +15,14 @@ app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
 
 const downloadsDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir);
+
+// Write Instagram cookies from env var to a temp file at startup
+let cookiesFile = null;
+if (process.env.INSTAGRAM_COOKIES) {
+  cookiesFile = path.join(os.tmpdir(), 'instagram_cookies.txt');
+  fs.writeFileSync(cookiesFile, process.env.INSTAGRAM_COOKIES, 'utf8');
+  console.log('✅  Instagram cookies loaded from environment');
+}
 
 function detectPlatform(url) {
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'YouTube';
@@ -36,19 +45,27 @@ function formatDuration(seconds) {
     : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+// Build cookies flag if available
+function getCookiesFlag(url) {
+  if (cookiesFile && url.includes('instagram.com')) {
+    return `--cookies "${cookiesFile}"`;
+  }
+  return '';
+}
+
 // GET /api/info
 app.get('/api/info', (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const platform = detectPlatform(url);
-  const cmd = `yt-dlp --dump-json --no-playlist "${url}"`;
+  const cookiesFlag = getCookiesFlag(url);
+  const cmd = `yt-dlp --dump-json --no-playlist ${cookiesFlag} "${url}"`;
 
   exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
     if (err) {
       return res.status(400).json({
         error: 'Could not fetch video info.',
-        hint: 'Ensure yt-dlp is installed: pip install yt-dlp',
         details: stderr.slice(0, 300),
       });
     }
@@ -56,7 +73,6 @@ app.get('/api/info', (req, res) => {
     try {
       const info = JSON.parse(stdout);
 
-      // Only MP4 video formats, deduplicated by height, sorted best first
       const seenHeights = new Set();
       const formats = (info.formats || [])
         .filter(f => f.ext === 'mp4' && f.height && f.vcodec && f.vcodec !== 'none')
@@ -99,18 +115,18 @@ app.post('/api/download', (req, res) => {
   const ts = Date.now();
   const filename = `dl_${ts}.%(ext)s`;
   const outputPath = path.join(downloadsDir, filename);
+  const cookiesFlag = getCookiesFlag(url);
 
   let formatFlag = '';
   if (audioOnly) {
     formatFlag = '-x --audio-format mp3';
   } else if (format_id) {
-    // Merge selected video with best audio into mp4
     formatFlag = `-f "${format_id}+bestaudio[ext=m4a]/${format_id}" --merge-output-format mp4`;
   } else {
     formatFlag = '-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4';
   }
 
-  const cmd = `yt-dlp ${formatFlag} -o "${outputPath}" --no-playlist "${url}"`;
+  const cmd = `yt-dlp ${formatFlag} ${cookiesFlag} -o "${outputPath}" --no-playlist "${url}"`;
 
   exec(cmd, { timeout: 180000 }, (err, stdout, stderr) => {
     if (err) {
